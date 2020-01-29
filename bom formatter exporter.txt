@@ -1,0 +1,265 @@
+﻿Public Sub Main() 
+'---start of iLogic rule--- Processes and exports Inventor BOMs in format legible to Accounting/Inventory automation software
+'Declare Variables
+Dim oDrawDoc As DrawingDocument
+Dim sFilename As String
+Dim RevNum As String
+Dim oPartsList1 As PartsList
+Dim oPartsListTemp As PartsList
+Dim oPlacementPoint As Point2d
+Dim billnum As String
+Dim oCol As PartsListColumn
+Dim colHeader As String
+Dim colCount As Integer
+Dim qtyStr As String
+Dim qtyFt As Double
+Dim oNextRow As PartsListRow
+Dim oCurrentRow As PartsListRow
+Dim oLastRow As PartsListRow
+Dim oMasQTYCell As PartsListCell
+Dim oLastQTYCell As PartsListCell
+Dim oNextQTYCell As PartsListCell
+Dim oMas90Cell As PartsListCell
+Dim oLastMas90Cell As PartsListCell
+Dim oItemCell As PartsListCell
+Dim oNextItemCell As PartsListCell
+Dim ItemNumDot As String
+Dim multiplier As Double
+Dim i As Integer
+Dim j As Integer
+Dim k As Integer
+Dim dotnum As Integer
+Dim rowCount As Integer
+Dim StartTime As Double
+Dim SecondsElapsed As Double
+Dim plateNumbers As String()
+Dim plateThicknesses As Double()
+Dim thickness As Double
+Dim volumeStr As String
+Dim volumeDbl As Double
+Dim conv As Double
+Dim surfArea As Double
+
+
+oDrawDoc = ThisApplication.ActiveDocument
+RevNum = iProperties.Value("Project", "Revision Number").ToString
+
+
+'Get bill number from User
+billnum = InputBox("Enter Bill Number:", "Export Sage BOM", "ex BU/F/2120 , 1487/B40")
+If billnum.Length = 0
+        Exit Sub
+End If
+
+
+'Remember time when macro starts
+ StartTime = Timer
+
+
+'Create Temporary Parts List
+oPlacementPoint = ThisApplication.TransientGeometry.CreatePoint2d(0, 0)
+oPartsListTemp = oDrawDoc.ActiveSheet.PartsLists.Add(oDrawDoc.ActiveSheet.DrawingViews(1), oPlacementPoint)
+oPartsListTemp.Sort("ITEM")
+
+
+'Iterate through columns And Remove (Makes code 20% faster)
+colCount = oPartsListTemp.PartsListColumns.Count
+For i = colCount To 1 Step -1
+        oCol = oPartsListTemp.PartsListColumns(i)
+        colHeader = oCol.Title.ToString
+        If (colHeader <> "Mas 90 #")And (colHeader <> "ITEM QTY") And (colHeader <> "ITEM") And (colHeader <> "PTI Description")
+                oCol.Remove
+        End If
+Next
+
+
+'Create Custom Property - Bill Number
+oCustomPropertySet = ThisDoc.Document.PropertySets.Item("Inventor User Defined Properties")
+Try
+oCustomPropertySet.Item("BILLNUM").Delete
+oCustomPropertySet.Add("", "BILLNUM", 200)
+Catch
+oCustomPropertySet.Add("", "BILLNUM", 200)
+End Try
+
+
+'Create Custom Property - Mas90 Item QTY
+Try
+oCustomPropertySet.Item("MAS90 ITEM QTY").Delete
+oCustomPropertySet.Add("", "MAS90 ITEM QTY", 199)
+Catch
+oCustomPropertySet.Add("", "MAS90 ITEM QTY", 199)
+End Try
+
+
+'Add and Fill BILLNUM Column
+oPartsListTemp.PartsListColumns.Add(kCustomProperty, 200, "Bill Number")
+colCount = oPartsListTemp.PartsListColumns.Count
+rowCount = oPartsListTemp.PartsListRows.Count
+For i = 1 To rowCount
+        oPartsListTemp.PartsListRows(i).Item(colCount).Value = billnum
+Next
+
+
+'Add Volume Column
+oPartsListTemp.PartsListColumns.Add(kVolumePartsListProperty)
+
+
+'Modify item numbers
+'sort by mas 90, iterate
+oPartsListTemp.Sort("Mas 90 #")
+oPartsListTemp.PartsListColumns.Add(kCustomProperty, 199, "MAS90 ITEM QTY")
+oPartsListTemp.PartsListColumns.Add(kQuantityPartsListProperty)
+colCount = oPartsListTemp.PartsListColumns.Count
+rowCount = oPartsListTemp.PartsListRows.Count
+'Get Plate Array
+plateNumbers = getPlateNumbers()
+plateThicknesses = getPlateThicknesses()
+For i = 1 To rowCount
+        oCurrentRow = oPartsListTemp.PartsListRows(i)
+        oMasQTYCell = oCurrentRow.Item("MAS90 ITEM QTY")
+        qtyStr = oCurrentRow.Item("QTY").Value
+        'Check Units, Convert MasQTY to Feet
+        If InStr(qtyStr, " in")
+                qtyStr = Left(qtyStr, (qtyStr.Length - 3))
+                conv = 12
+        ElseIf InStr(qtyStr, " mm")
+                qtyStr = Left(qtyStr, (qtyStr.Length - 3))
+                conv = 304.8
+        ElseIf InStr(qtyStr, " m")
+                qtyStr = Left(qtyStr, (qtyStr.Length - 2))
+                conv = 0.3048
+        Else 'whole number
+                conv = 1
+        End If
+        qtyFt = CDbl(qtyStr)
+        qtyFt = Round((qtyFt / conv), 2)
+        oMasQTYCell.Value = qtyFt
+        'Convert Plate QTY to Surface Area
+        oMas90Cell = oCurrentRow.Item("Mas 90 #")
+        k = IsInArrayIndex(oMas90Cell.Value, plateNumbers)
+        If k > 0
+                volumeStr = oCurrentRow.Item("VOLUME").Value
+                thickness = plateThicknesses(k)
+                thickness = thickness/12 'convert in to ft
+                If InStr(volumeStr, "mm^3")
+                        volumeStr = Left(volumeStr, (volumeStr.Length - 4))
+                        conv = 28370000 'mm3/ft3
+                ElseIf InStr(volumeStr, "m^3")
+                        volumeStr = Left(volumeStr, (volumeStr.Length - 3))
+                        conv = 0.02831 'm3/ft3
+                ElseIf InStr(volumeStr, "ft^3")
+                        volumeStr = Left(volumeStr, (volumeStr.Length - 4))
+                        conv = 1 'ft3/ft3
+                ElseIf InStr(volumeStr, "in^3")
+                        volumeStr = Left(volumeStr, (volumeStr.Length - 4))
+                        conv = 1728 'in3/ft3
+                End If
+                volumeDbl = CDbl(volumeStr)
+                volumeDbl = volumeDbl/conv 'convert to ft3
+                surfArea = Round((volumeDbl / thickness), 2)
+                surfArea = surfArea * CDbl(qtyStr)
+                oMasQTYCell.Value = surfArea
+        End If
+        'Sum Duplicate Pnumbers
+    If i <> 1
+                oLastRow = oPartsListTemp.PartsListRows(i-1)
+                oLastMas90Cell = oLastRow.Item("Mas 90 #")
+                If (oMas90Cell.Value <> "") And (oMas90Cell.Value = oLastMas90Cell.Value)
+                        oLastQTYCell = oLastRow.Item("MAS90 ITEM QTY")
+                        oMasQTYCell.Value = Round((CDbl(oMasQTYCell.Value) + CDbl(oLastQTYCell.Value)), 2)
+                        oLastQTYCell.Value = 0
+                        oPartsListTemp.PartsListRows(i-1).Visible = False
+                End If
+    End If
+Next 
+
+
+'Convert Structured To parts only quantities (uses interation instead of recursion)
+For i = 1 To rowCount
+oCurrentRow = oPartsListTemp.PartsListRows(i)
+        If i <> rowCount
+                oNextRow = oPartsListTemp.PartsListRows(i + 1)
+            oItemCell = oCurrentRow.Item("ITEM")
+                oNextItemCell = oNextRow.Item("ITEM")
+                ItemNumDot = oItemCell.Value + "."
+                If ItemNumDot = Left(oNextItemCell.Value, ItemNumDot.Length)
+                        'we know has branches. need to scan entire list for first sub-branches and apply multiplier
+                        multiplier = CDbl(oCurrentRow.Item("MAS90 ITEM QTY").Value)
+                        dotnum = (Len(oItemCell.Value) -Len(Replace(oItemCell.Value, ".", ""))) 'number of dots in current row
+                        dotnum = dotnum + 1 'will apply multiplier only one level down
+                        j = 1
+                        proceed = True
+                        Do While proceed
+                                oNextRow = oPartsListTemp.PartsListRows(i + j)
+                                oNextItemCell = oNextRow.Item("ITEM")
+                                oNextQTYCell = oNextRow.Item("MAS90 ITEM QTY")
+                                If ItemNumDot = Left(oNextItemCell.Value, ItemNumDot.Length)
+                                        'still a branch
+                                        If dotnum = (Len(oNextItemCell.Value) -Len(Replace(oNextItemCell.Value, ".", ""))) 'number of dots in next row
+                                                oNextQTYCell.Value = (multiplier * CDbl(oNextQTYCell.Value))
+                                        End If
+                                        j = j + 1
+                                Else
+                                        proceed = False
+                                        multiplier = 0
+                            End If
+                        Loop
+                        oCurrentRow.Item("MAS90 ITEM QTY").Value = 0
+                End If
+        End If
+Next
+
+
+'Iterate through columns and remove
+colCount = oPartsListTemp.PartsListColumns.Count
+For i = colCount To 1 Step -1
+        oCol = oPartsListTemp.PartsListColumns(i)
+        colHeader = oCol.Title.ToString
+        If (colHeader <> "Mas 90 #") And (colHeader <> "MAS90 ITEM QTY") And (colHeader <> "Bill Number")' And (colHeader <> "PTI Description") And (colHeader <> "ITEM")
+                oCol.Remove
+        End If
+Next
+
+
+'Get PDF target folder path And filename
+sFilename = "C:\Users\epax\Desktop\" & ThisDoc.FileName(False) & " Rev" & RevNum & ".xls"
+oPartsListTemp.Export(sFilename, PartsListFileFormatEnum.kMicrosoftExcel)
+oPartsListTemp.Delete
+
+
+'Determine how many seconds code took to run
+  SecondsElapsed = Round(Timer - StartTime, 2)
+
+
+'Notify user in seconds
+  MsgBox("BOM Exported! (" & SecondsElapsed & " seconds)", vbInformation)
+  
+End Sub
+
+
+'---Helper Functions---
+
+
+Public Function IsInArrayIndex(stringToBeFound As String, arr() As String) As Integer
+    Dim q
+        IsInArrayIndex = 0
+    For q = LBound(arr) To UBound(arr)
+        If arr(q) = stringToBeFound Then
+                        IsInArrayIndex = q
+            Exit Function
+                Else
+                        IsInArrayIndex = 0
+        End If
+    Next q
+End Function
+
+
+Public Function getPlateNumbers() As String()
+        getPlateNumbers = {"", "P150010","P150002","P140018","P120052","P120047","P120024","P120022","P120012","P120009","P110006","P100244","P100236","P100231","P100229","P100227","P100226","P100219","P100214","P100200","P100199","P100196","P100195","P100191","P100179","P100178","P100177","P100176","P100175","P100174","P100173","P100172","P100171","P100170","P100169","P100168","P100157","P100154","P100141","P100140","P100138","P100117","P100084","P100065","P100063","P100062","P100055","P100049","P100043","P100041","P100028","P100008","P100002","P100001"}
+End Function
+
+
+Public Function getPlateThicknesses() As Double()
+        getPlateThicknesses = {0, 0.5, 0.375, 2, 0.125, 2, 0.0625, 0.25, 0.375, 0.5, 0.125, 0.0625, 0.625, 2, 2, 2, 2, 2, 2, 4, 0.078125, 0.75, 0.75, 1, 0.1875, 2, 2, 2, 2, 2, 2, 2, 2, 0.0625, 0.125, 0.5, 0.125, 0.375, 1.5, 1.5, 0.25, 2, 0.05, 0.1875, 1.5, 8, 0.125, 1, 0.375, 0.125, 0.0625, 0.5, 0.75, 0.25}
+End Function
